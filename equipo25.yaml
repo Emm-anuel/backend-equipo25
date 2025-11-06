@@ -1,0 +1,608 @@
+openapi: 3.0.3
+info:
+  title: RAG Platform API
+  version: "1.0.0"
+  contact:
+    name: Equipo RAG-UA
+    email: rag-equipo25@example.edu
+    url: https://equipo25.mx/rag
+  description: |
+    API del sistema RAG (Retrieval-Augmented Generation) que permite a usuarios autenticados
+    consultar información contenida en documentos cargados e indexados, devolviendo respuestas
+    generadas por un LLM con contexto recuperado desde una base de datos vectorial.
+
+    Propósito
+    - Exponer endpoints para: autenticación, gestión de usuarios/roles, carga y administración de documentos,
+      consultas RAG (incluido modo streaming) y consulta de la bitácora de auditoría.
+    - Garantizar que cada respuesta del LLM esté sustentada en fuentes específicas (documentos y fragmentos recuperados).
+
+    Alcance funcional
+    - Carga de documentos (PDF/texto), validación e indexación (ingesta/chunking → embeddings).
+    - Recuperación semántica (retriever + vector DB) y construcción de prompts con contexto.
+    - Respuesta generada por el LLM con trazabilidad de fuentes y métricas de uso (tokens/latencia).
+    - Bitácora de eventos para auditoría: logins, cargas, indexaciones, consultas y errores.
+
+    Diseño y responsabilidades
+    - La persistencia estructurada (usuarios, roles, metadatos, bitácora) se gestiona en BD SQL.
+    - La búsqueda por similitud y los embeddings se gestionan en la base de datos vectorial.
+    - El orquestador RAG coordina retrieval → prompt → inferencia y devuelve una respuesta explicable.
+
+    Seguridad
+    - Autenticación mediante Bearer JWT y control de acceso por rol (ADMIN/CLIENT).
+    - Los endpoints de consulta RAG y de documentos requieren token válido; /auth/login es público.
+    - La bitácora es de solo lectura vía API (auditoría y trazabilidad).
+
+    No objetivos (out of scope)
+    - Edición de respuestas del LLM vía API.
+    - Descarga masiva del índice vectorial o de embeddings.
+    - Ejecución de modelos LLM on-prem mediante este contrato (se invoca por proveedor/servicio externo).
+servers:
+  - url: https://api.equipo25.edu/rag
+    description: Producción
+  - url: https://staging.api.equipo25.edu/rag
+    description: Staging
+tags:
+  - name: Auth
+    description: Autenticación y sesión
+  - name: Users
+    description: Gestión de usuarios y roles
+  - name: Documents
+    description: Carga y gestión de documentos
+  - name: RAG
+    description: Consultas a la IA con recuperación semántica
+  - name: Audit
+    description: Consulta de bitácora (solo lectura)
+security:
+  - bearerAuth: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    PageParam:
+      name: page
+      in: query
+      description: Número de página (desde 1)
+      required: false
+      schema: { type: integer, minimum: 1, default: 1 }
+    PageSizeParam:
+      name: pageSize
+      in: query
+      description: Tamaño de página
+      required: false
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    FromParam:
+      name: from
+      in: query
+      description: Fecha/hora inicio (ISO 8601)
+      required: false
+      schema: { type: string, format: date-time }
+    ToParam:
+      name: to
+      in: query
+      description: Fecha/hora fin (ISO 8601)
+      required: false
+      schema: { type: string, format: date-time }
+    QParam:
+      name: q
+      in: query
+      description: Texto de búsqueda
+      required: false
+      schema: { type: string }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        code: { type: string, description: Código interno de error }
+        message: { type: string, description: Mensaje de error legible }
+        details:
+          type: object
+          additionalProperties: true
+      required: [message]
+
+    AuthLoginRequest:
+      type: object
+      properties:
+        email: { type: string, format: email, description: Correo del usuario }
+        password: { type: string, description: Contraseña }
+      required: [email, password]
+      example:
+        email: admin@example.edu
+        password: Secreta123
+
+    AuthToken:
+      type: object
+      properties:
+        accessToken: { type: string, description: JWT Bearer }
+        tokenType: { type: string, enum: [Bearer], default: Bearer }
+        expiresIn: { type: integer, description: Segundos de validez }
+        refreshToken:
+          type: string
+          description: (Opcional) token de refresco si la plataforma lo usa
+      required: [accessToken, tokenType, expiresIn]
+
+    User:
+      type: object
+      properties:
+        id: { type: string, description: ID del usuario (uuid o string) }
+        name: { type: string }
+        email: { type: string, format: email }
+        role: { type: string, enum: [ADMIN, CLIENT] }
+        status: { type: string, enum: [ACTIVE, INACTIVE], default: ACTIVE }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+      required: [id, name, email, role, status, createdAt]
+
+    UserCreate:
+      type: object
+      properties:
+        name: { type: string }
+        email: { type: string, format: email }
+        password: { type: string, minLength: 6 }
+        role: { type: string, enum: [ADMIN, CLIENT], default: CLIENT }
+      required: [name, email, password]
+
+    UserPatch:
+      type: object
+      properties:
+        name: { type: string }
+        role: { type: string, enum: [ADMIN, CLIENT] }
+        status: { type: string, enum: [ACTIVE, INACTIVE] }
+
+    DocumentStatus:
+      type: string
+      enum: [PENDING, INDEXED, ERROR]
+
+    Document:
+      type: object
+      properties:
+        id: { type: string }
+        title: { type: string }
+        filename: { type: string }
+        sizeBytes: { type: integer }
+        mimeType: { type: string }
+        tags:
+          type: array
+          items: { type: string }
+        status: { $ref: '#/components/schemas/DocumentStatus' }
+        uploadedBy:
+          type: object
+          properties:
+            id: { type: string }
+            name: { type: string }
+          required: [id]
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+      required: [id, title, filename, status, uploadedBy, createdAt]
+
+    DocumentUploadResponse:
+      type: object
+      properties:
+        document: { $ref: '#/components/schemas/Document' }
+      required: [document]
+
+    RagQueryRequest:
+      type: object
+      properties:
+        question: { type: string, description: Pregunta del usuario }
+        topK: { type: integer, default: 5, minimum: 1, maximum: 50 }
+        filters:
+          type: object
+          properties:
+            tags:
+              type: array
+              items: { type: string }
+            docIds:
+              type: array
+              items: { type: string }
+        returnSources: { type: boolean, default: true }
+      required: [question]
+      example:
+        question: "¿Cuál es la política de devoluciones?"
+        topK: 5
+        filters:
+          tags: ["políticas"]
+        returnSources: true
+
+    RagSource:
+      type: object
+      properties:
+        docId: { type: string }
+        title: { type: string }
+        snippet: { type: string }
+        score: { type: number }
+
+    RagAnswer:
+      type: object
+      properties:
+        answer: { type: string }
+        sources:
+          type: array
+          items: { $ref: '#/components/schemas/RagSource' }
+        usage:
+          type: object
+          properties:
+            promptTokens: { type: integer }
+            completionTokens: { type: integer }
+            totalTokens: { type: integer }
+
+    AuditType:
+      type: string
+      enum: [LOGIN, LOGOUT, DOC_UPLOAD, DOC_INDEX, RAG_QUERY, ERROR, OTHER]
+
+    AuditStatus:
+      type: string
+      enum: [OK, ERROR, WARN]
+
+    AuditLog:
+      type: object
+      properties:
+        id: { type: string }
+        timestamp: { type: string, format: date-time }
+        userId: { type: string, nullable: true }
+        type: { $ref: '#/components/schemas/AuditType' }
+        status: { $ref: '#/components/schemas/AuditStatus' }
+        entity: { type: string, nullable: true }
+        entityId: { type: string, nullable: true }
+        message: { type: string, nullable: true }
+        details:
+          type: object
+          additionalProperties: true
+        requestId: { type: string }
+      required: [id, timestamp, type, status]
+
+    PageMeta:
+      type: object
+      properties:
+        page: { type: integer }
+        pageSize: { type: integer }
+        totalItems: { type: integer }
+        totalPages: { type: integer }
+      required: [page, pageSize, totalItems, totalPages]
+
+    PaginatedUsers:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/User' }
+        meta: { $ref: '#/components/schemas/PageMeta' }
+      required: [items, meta]
+
+    PaginatedDocuments:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Document' }
+        meta: { $ref: '#/components/schemas/PageMeta' }
+      required: [items, meta]
+
+    PaginatedAuditLogs:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/AuditLog' }
+        meta: { $ref: '#/components/schemas/PageMeta' }
+      required: [items, meta]
+
+paths:
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Inicia sesión con credenciales
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AuthLoginRequest' }
+      responses:
+        '200':
+          description: Autenticación exitosa
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthToken' }
+        '401':
+          description: Credenciales inválidas
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Cierra sesión e invalida el token actual
+      responses:
+        '204':
+          description: Sesión cerrada
+        '401':
+          description: No autorizado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /users:
+    post:
+      tags: [Users]
+      summary: Crea un nuevo usuario
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserCreate' }
+      responses:
+        '201':
+          description: Usuario creado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '400':
+          description: Datos inválidos
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '409':
+          description: Usuario existente (conflicto)
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    get:
+      tags: [Users]
+      summary: Lista usuarios con paginación y filtros
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+        - name: role
+          in: query
+          schema: { type: string, enum: [ADMIN, CLIENT] }
+          description: Filtra por rol
+        - $ref: '#/components/parameters/QParam'
+      responses:
+        '200':
+          description: Lista paginada de usuarios
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedUsers' }
+
+  /users/{userId}:
+    get:
+      tags: [Users]
+      summary: Obtiene el detalle de un usuario
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Usuario encontrado
+          content: { application/json: { schema: { $ref: '#/components/schemas/User' } } }
+        '404':
+          description: Usuario no encontrado
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    patch:
+      tags: [Users]
+      summary: Actualiza parcialmente un usuario
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserPatch' }
+      responses:
+        '200':
+          description: Usuario actualizado
+          content: { application/json: { schema: { $ref: '#/components/schemas/User' } } }
+        '400':
+          description: Datos inválidos
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '404':
+          description: Usuario no encontrado
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    delete:
+      tags: [Users]
+      summary: Desactiva o elimina un usuario
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Usuario eliminado/desactivado
+        '404':
+          description: Usuario no encontrado
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+  /documents:
+    post:
+      tags: [Documents]
+      summary: Sube un documento para indexación
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Archivo a cargar (PDF o texto)
+                title:
+                  type: string
+                tags:
+                  type: array
+                  items: { type: string }
+              required: [file]
+      responses:
+        '201':
+          description: Documento cargado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DocumentUploadResponse' }
+        '400':
+          description: Formato no soportado o datos inválidos
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    get:
+      tags: [Documents]
+      summary: Lista documentos con filtros
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+        - name: status
+          in: query
+          description: Filtra por estado de indexación
+          schema: { $ref: '#/components/schemas/DocumentStatus' }
+        - name: tag
+          in: query
+          description: Filtra por etiqueta
+          schema: { type: string }
+        - $ref: '#/components/parameters/QParam'
+      responses:
+        '200':
+          description: Lista paginada de documentos
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedDocuments' }
+
+  /documents/{docId}:
+    get:
+      tags: [Documents]
+      summary: Obtiene detalle de un documento
+      parameters:
+        - name: docId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Documento encontrado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Document' }
+        '404':
+          description: Documento no encontrado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    delete:
+      tags: [Documents]
+      summary: Elimina o desactiva un documento
+      parameters:
+        - name: docId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Documento eliminado/desactivado
+        '404':
+          description: Documento no encontrado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /rag/query:
+    post:
+      tags: [RAG]
+      summary: Realiza una consulta al motor RAG
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RagQueryRequest' }
+      responses:
+        '200':
+          description: Respuesta generada con fuentes
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RagAnswer' }
+        '422':
+          description: Datos de entrada inválidos
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /rag/query/stream:
+    post:
+      tags: [RAG]
+      summary: Consulta al motor RAG con respuesta en streaming
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RagQueryRequest' }
+      responses:
+        '200':
+          description: Flujo de texto progresivo (SSE)
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: Eventos SSE con fragmentos de texto
+        '422':
+          description: Datos de entrada inválidos
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /audit-logs:
+    get:
+      tags: [Audit]
+      summary: Lista eventos de bitácora con filtros
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+        - name: type
+          in: query
+          description: Tipo de evento
+          schema: { $ref: '#/components/schemas/AuditType' }
+        - name: status
+          in: query
+          description: Estado del evento
+          schema: { $ref: '#/components/schemas/AuditStatus' }
+        - name: userId
+          in: query
+          schema: { type: string }
+          description: Filtra por usuario
+        - name: requestId
+          in: query
+          schema: { type: string }
+          description: Filtra por requestId
+        - $ref: '#/components/parameters/FromParam'
+        - $ref: '#/components/parameters/ToParam'
+        - $ref: '#/components/parameters/QParam'
+      responses:
+        '200':
+          description: Lista paginada de eventos de bitácora
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedAuditLogs' }
+
+  /audit-logs/{logId}:
+    get:
+      tags: [Audit]
+      summary: Obtiene el detalle de un evento de bitácora
+      parameters:
+        - name: logId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Evento encontrado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditLog' }
+        '404':
+          description: Evento no encontrado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
