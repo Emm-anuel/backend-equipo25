@@ -1,21 +1,21 @@
 import os
 import hashlib
-from datetime import datetime, timedelta
 
 import pymssql
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, session
 from flask_cors import CORS
-import jwt
 
 """
 Microservice responsible only for authenticating users.
+This version mirrors the simple session-based approach from web services/ws.py,
+so it does not rely on PyJWT.
 Run with: python login_service.py
 """
 
 app = Flask(__name__)
 CORS(app)
 
-app.config['SECRET_KEY'] = os.environ.get('AUTH_SECRET_KEY', 'replace-me')
+app.secret_key = os.environ.get('AUTH_SECRET_KEY', 'replace-me')
 
 SERVER = os.environ.get('DB_SERVER', 'localhost')
 DATABASE = os.environ.get('DB_NAME', 'master')
@@ -40,20 +40,6 @@ def get_db_connection():
 def verify_password(stored_hash, provided_password):
     hashed_provided = hashlib.sha1(provided_password.encode()).hexdigest()
     return stored_hash == hashed_provided
-
-
-def generate_token(user_row):
-    expiration = datetime.utcnow() + timedelta(hours=24)
-    payload = {
-        'sub': user_row['id'],
-        'username': user_row['username'],
-        'name': user_row.get('nombre_completo'),
-        'exp': expiration
-    }
-    token = jwt.encode(payload, app.config['SECRET_KEY'], algorithm='HS256')
-    if isinstance(token, bytes):
-        token = token.decode('utf-8')
-    return token, int(expiration.timestamp())
 
 
 @app.route('/health', methods=['GET'])
@@ -85,20 +71,16 @@ def login():
         if not user or not verify_password(user['contrasena'], password):
             return jsonify({'error': 'Credenciales inválidas'}), 401
 
-        token, exp_ts = generate_token(user)
-        response = {
-            'accessToken': token,
-            'tokenType': 'Bearer',
-            'expiresIn': 24 * 60 * 60,
-            'expiresAt': exp_ts,
+        session['username'] = user['username']
+        return jsonify({
+            'mensaje': 'Autenticacion exitosa',
             'user': {
                 'id': user['id'],
                 'username': user['username'],
                 'email': user['email'],
                 'name': user.get('nombre_completo')
             }
-        }
-        return jsonify(response), 200
+        }), 200
     except Exception as exc:
         app.logger.exception("Login error: %s", exc)
         return jsonify({'error': 'Error procesando la solicitud'}), 500
