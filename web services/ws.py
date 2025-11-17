@@ -188,5 +188,68 @@ def delete_personaje(id):
         return jsonify({'error': 'No se pudo conectar a la base de datos'}), 500
 
 
+@app.route('/rag/query', methods=['POST'])
+def rag_query():
+    data = request.get_json()
+    question = data.get('question', '')
+    
+    # Obtener documentos reales de la base de datos
+    conn = get_db_connection()
+    available_docs = []
+    if conn:
+        try:
+            cursor = conn.cursor(as_dict=True)
+            cursor.execute("SELECT nombre_archivo FROM documentos WHERE estatus IN ('Activo', 'Archivado')")
+            docs = cursor.fetchall()
+            available_docs = [doc['nombre_archivo'] for doc in docs]
+        except:
+            available_docs = ['Contrato-Proveedor.pdf', 'Estado-Financiero.xlsx', 'Manual-Empleado.docx']
+        finally:
+            conn.close()
+    else:
+        available_docs = ['Contrato-Proveedor.pdf', 'Estado-Financiero.xlsx', 'Manual-Empleado.docx']
+    
+    # Mock responses basadas en palabras clave de documentos internos
+    mock_responses = {
+        'contrato': 'Según el análisis de Contrato-Proveedor.pdf, se identificó una cláusula de incumplimiento en la sección 4.2 que establece penalizaciones del 5% por retrasos superiores a 15 días hábiles. El contrato tiene vigencia hasta diciembre de 2025.',
+        'proveedor': 'De acuerdo con Contrato-Proveedor.pdf, el proveedor actual es TechSupply Inc. con NIF B-12345678. Las condiciones de pago son NET 30 y el contacto principal es el Ing. Roberto Sánchez.',
+        'financiero': 'Basado en Estado-Financiero.xlsx, los resultados del Q3 2025 muestran un incremento del 12% en ingresos respecto al trimestre anterior. El EBITDA se situó en $2.4M con un margen operativo del 18%.',
+        'presupuesto': 'Según Estado-Financiero.xlsx, el presupuesto anual aprobado es de $8.5M distribuido en: 45% operaciones, 30% recursos humanos, 15% tecnología y 10% marketing.',
+        'empleado': 'De acuerdo con Manual-Empleado.docx, el programa de capacitación incluye 40 horas anuales obligatorias. Los nuevos empleados tienen un periodo de prueba de 90 días y acceso a beneficios después de 6 meses.',
+        'vacaciones': 'Según Manual-Empleado.docx, los empleados tienen derecho a 15 días hábiles de vacaciones anuales después del primer año. Se pueden acumular hasta 30 días máximo.',
+        'capacitación': 'El Manual-Empleado.docx especifica que el programa de capacitación cubre: onboarding (primera semana), seguridad y compliance (mensual), y desarrollo profesional (trimestral).',
+        'cumplimiento': 'Basado en los documentos de compliance, la empresa sigue los estándares ISO 27001 para seguridad de información y realiza auditorías trimestrales de cumplimiento normativo.',
+    }
+    
+    # Buscar respuesta basada en palabras clave
+    response_text = None
+    question_lower = question.lower()
+    selected_sources = []
+    
+    for keyword, response in mock_responses.items():
+        if keyword in question_lower:
+            response_text = response
+            # Extraer documentos mencionados en la respuesta
+            for doc in available_docs:
+                if doc in response:
+                    selected_sources.append(doc)
+            break
+    
+    # Respuesta genérica si no se encuentra palabra clave
+    if not response_text:
+        response_text = f'Según los documentos corporativos disponibles, he encontrado información relacionada con su consulta: "{question}". Los archivos indican que este tema requiere análisis de la documentación interna. Se recomienda revisar los archivos de políticas y procedimientos para información detallada.'
+        selected_sources = available_docs[:2] if len(available_docs) >= 2 else available_docs
+    
+    # Si no se seleccionaron fuentes, usar algunas aleatorias
+    if not selected_sources and available_docs:
+        selected_sources = available_docs[:3] if len(available_docs) >= 3 else available_docs
+    
+    return jsonify({
+        'answer': response_text,
+        'sources': selected_sources,
+        'confidence': 0.87
+    }), 200
+
+
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
